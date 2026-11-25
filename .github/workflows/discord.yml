@@ -1,0 +1,26 @@
+name: Discord
+
+# Posts pushes to main to #progress and published releases to #announcements.
+# Set the DISCORD_WEBHOOK_PROGRESS and DISCORD_WEBHOOK_ANNOUNCEMENTS repository
+# secrets (Settings > Secrets and variables > Actions) to Discord webhook URLs.
+# Without them the job skips posting instead of failing.
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ github.event_name == 'release' && secrets.DISCORD_WEBHOOK_ANNOUNCEMENTS || secrets.DISCORD_WEBHOOK_PROGRESS }}
+        run: python3 scripts/discord_notify.py --event "${{ github.event_name }}" --event-path "$GITHUB_EVENT_PATH"
