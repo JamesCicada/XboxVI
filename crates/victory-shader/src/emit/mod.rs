@@ -461,6 +461,32 @@ pub fn emit(
                 }
             }
         }
+        // Last of all, where every other form still needs 64-lane waves (which the host
+        // refuses: the program would not run at all): the wave-wide branches. Not earlier
+        // by default, since that form lost the card in a world run on an RTX 4060 (driver
+        // 32.0.16.2124) about 11 s after `ptfx_CS_lightAtlas_Sprite` first ran in it, as in
+        // runs 121-124 before; those programs have another form and never get here.
+        // `VICTORY_WAVE_WIDE=0` turns this off too.
+        let last_on = std::env::var_os("VICTORY_WAVE_WIDE").is_none_or(|v| v != "0");
+        if !wide_on && last_on {
+            let base = [forms[1].1.as_ref().map(|f| &f.0), forms[0].1.as_ref().map(|f| &f.0)]
+                .into_iter()
+                .flatten()
+                .next()
+                .unwrap_or(p);
+            let again = widen(c, native, base, why);
+            report("wave-wide branches (last resort)", &again);
+            if done(&again) {
+                return again.map(|(shader, _)| shader);
+            }
+            if !std::ptr::eq(base, p) {
+                let again = widen(c, native, p, why);
+                report("wave-wide branches (last resort, as given)", &again);
+                if done(&again) {
+                    return again.map(|(shader, _)| shader);
+                }
+            }
+        }
     }
     // SCC of a mask operation joined with a scalar test behind a per-lane skip (the 32-lane
     // trace programs): right once the wave takes that skip together ([`widen`]; the
