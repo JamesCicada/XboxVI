@@ -64,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File scripts\play-plain.ps1 -Game "<your gam
 `scripts\play-plain.ps1` keeps the shader cache and saves in folders you choose
 (`-Cache`, `-Data`) and presses no buttons for you. `scripts\play.ps1 -Exe <the game's exe>`
 starts it with the faster settings of the VIctory-7900XTX tree instead (`-Safe` without the
-newest of them); it runs `target\diagictory.exe`, built with
+newest of them); it runs `target\diag\victory.exe`, built with
 `cargo build --profile diag -p victory --features diagnostics`. Controller: XInput pads
 (a DualShock/DualSense through DS4Windows works). With no pad connected the
 keyboard acts as one while the game window has focus.
