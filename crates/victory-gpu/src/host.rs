@@ -8713,8 +8713,9 @@ impl Meter {
                     per_frame(6) / 1e3
                 );
             }
+            let live = crate::live::tag().map_or(String::new(), |t| format!("[live {t}] "));
             tracing::info!(
-                "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
+                "{live}{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \

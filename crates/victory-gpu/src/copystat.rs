@@ -271,13 +271,13 @@ pub(crate) fn card_waited(us: u64, what: impl FnOnce() -> String) {
 /// bits for `both`. For timing only: without the waits a shader may read
 /// what another has not finished writing.
 pub(crate) fn barrier_test() -> u8 {
-    static TEST: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *TEST.get_or_init(|| match std::env::var("VICTORY_BARRIER_TEST").as_deref() {
-        Ok("groups") => 1,
-        Ok("indirect") => 2,
-        Ok("both") => 3,
+    static TEST: crate::live::Switch = crate::live::Switch::new("VICTORY_BARRIER_TEST", |v| match v {
+        Some("groups") => 1,
+        Some("indirect") => 2,
+        Some("both") => 3,
         _ => 0,
-    })
+    });
+    TEST.get() as u8
 }
 
 /// Per range compared after a submission (start, length): times, and the
@@ -731,6 +731,20 @@ fn log_memory() {
     let windows = crate::shadow::windows();
     let stagings = crate::texture::let_go();
     let census = crate::resource::census();
+    {
+        let o = crate::resource::targets_overlap();
+        tracing::info!(
+            "targets in title memory: {} host copies the host renders to or writes, {:.0} MB on the host              ({} placed in title heaps); their title memory {:.0} MB summed, {:.0} MB covered; {} share              title memory with another ({:.0} MB on the host); {:.0} MB held by lists now",
+            o[0],
+            mb(o[1]),
+            o[2],
+            mb(o[3]),
+            mb(o[4]),
+            o[5],
+            mb(o[6]),
+            mb(o[7]),
+        );
+    }
     let kinds: Vec<u64> = crate::resource::KINDS.iter().map(|k| k.load(Relaxed)).collect();
     let card = crate::host::host()
         .and_then(|h| h.video_memory())

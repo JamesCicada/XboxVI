@@ -2255,6 +2255,72 @@ pub(crate) fn census() -> [u64; 10] {
     count
 }
 
+/// How the textures the host renders to or writes lie in title memory
+/// (diagnostics, for the memory line): the console reuses a heap's memory
+/// for targets that are not alive at once, the host gives each its own.
+/// Of those with a host copy: how many, their host bytes (twins included),
+/// how many are placed in a title heap, their title bytes summed, the title
+/// bytes they cover together, how many share title memory with another,
+/// those ones' host bytes, and the host bytes of the ones a list holds now.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn targets_overlap() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    let mut spans: Vec<(u64, u64, u64)> = Vec::new();
+    let all = textures();
+    for &at in all.iter() {
+        // SAFETY: as in `census`.
+        let r = unsafe { &*(at as *const Resource) };
+        let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((host, twin)) = made.as_ref() else { continue };
+        if host.filled {
+            continue;
+        }
+        let bytes = host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
+        out[0] += 1;
+        out[1] += bytes;
+        if r.host.placed.load(std::sync::atomic::Ordering::Relaxed) {
+            out[2] += 1;
+        }
+        if crate::host::references(&host.texture) > 1 {
+            out[7] += bytes;
+        }
+        let len = footprint(&r.desc).map_or(0, |f| f.size);
+        let start = r.data() as u64;
+        if len > 0 {
+            out[3] += len;
+            spans.push((start, start + len, bytes));
+        }
+    }
+    drop(all);
+    spans.sort_unstable();
+    let mut shared = vec![false; spans.len()];
+    let (mut reach, mut reach_at) = (0u64, usize::MAX);
+    let (mut union_start, mut union_end) = (0u64, 0u64);
+    for (i, &(start, end, _)) in spans.iter().enumerate() {
+        if start < reach {
+            shared[i] = true;
+            shared[reach_at] = true;
+        }
+        if end > reach {
+            (reach, reach_at) = (end, i);
+        }
+        if start >= union_end {
+            out[4] += union_end - union_start;
+            (union_start, union_end) = (start, end);
+        } else {
+            union_end = union_end.max(end);
+        }
+    }
+    out[4] += union_end - union_start;
+    for (i, &(_, _, bytes)) in spans.iter().enumerate() {
+        if shared[i] {
+            out[5] += 1;
+            out[6] += bytes;
+        }
+    }
+    out
+}
+
 /// Host textures alive (the title's and the twins) and the bytes the host
 /// gives them, for the memory line.
 #[cfg(windows)]
