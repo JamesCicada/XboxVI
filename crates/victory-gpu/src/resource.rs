@@ -1696,12 +1696,31 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // (`crate::shadow::card_room_kept`) and for the render targets a
         // world makes in its first frame ([`targets_room_kept`]) counts as
         // used.
-        Some([budget, used, ..]) => {
+        Some([budget, used, shared_budget, shared_used]) => {
             used.saturating_sub(crate::pool::texture_room()) + crate::shadow::card_room_kept() + targets_room_kept()
                 < budget / 100 * room_percent()
+                && shared_room(shared_budget, shared_used)
         }
         None => filled < WITHOUT_BUDGET,
     }
+}
+
+/// Whether the PC's memory shared with the card has room for more host
+/// copies of textures: its use under [`room_percent`] of its budget.
+/// `VICTORY_SHARED_ROOM=0` (live, `crate::live`) leaves it unasked, as before.
+///
+/// What does not fit in the card's own memory the system moves into this
+/// group, and its budget is about half the PC's memory whatever the page
+/// file: 7,458 MB on a 16 GB PC. Run amd4 (RTX 4060, 8 GB) ended when both
+/// were full, the card's at 7,196 of 7,048 MB and the shared at 7,258 of
+/// 7,458 MB: uploads were refused (`E_OUTOFMEMORY`) and the driver fell
+/// over a second later; run on7900a stood at 7,006 and 6,677 MB four
+/// minutes in, still growing. The commit left was 3.6 GB at the first.
+#[cfg(windows)]
+fn shared_room(budget: u64, used: u64) -> bool {
+    static ON: crate::live::Switch =
+        crate::live::Switch::new("VICTORY_SHARED_ROOM", |v| u32::from(v.map(str::trim) != Some("0")));
+    ON.get() == 0 || budget == 0 || used < budget / 100 * room_percent()
 }
 
 /// The bytes of the card's memory the texture queue leaves free for
