@@ -2088,6 +2088,20 @@ impl HostHeap {
         true
     }
 
+    /// The buffer view of title slot `index` lies in memory the title has
+    /// unmapped: a host slot made from it becomes null, so that the window
+    /// it shows can be let go (`crate::shadow::let_go_idle`; a slot keeps
+    /// what it views). True if the slot was made. See `draw.rs`
+    /// `heap_buffer_pass`.
+    pub(crate) fn buffer_slot_gone(&self, index: u32) -> bool {
+        let _made = self.made.lock(index);
+        if self.made.get(index).is_none_or(|key| key == 0) {
+            return false;
+        }
+        self.unmake(index);
+        true
+    }
+
     /// Whether host slot `index` shows the placed texture the title's record
     /// at `handle` views, by an earlier view of it.
     pub(crate) fn texture_slot_shows_other(&self, index: u32, handle: u64) -> bool {
