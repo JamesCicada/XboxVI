@@ -1356,32 +1356,78 @@ pub(crate) fn host_made<'a>(
 
 /// Whether more host copies of textures the title fills may be made for
 /// shaders that pick textures by index (`draw.rs` `heap_textures`): always
-/// up to `FLOOR` bytes of them, beyond that while the card's memory in use
-/// by this process is under nine tenths of the budget the system gives it
-/// (`VICTORY_TEXTURE_BUDGET_MB` sets a limit on those copies' bytes
-/// instead). Past the budget the system moves the card's memory into the
-/// PC's, which ended runs 20 and 24.
+/// up to `FLOOR` bytes of them; beyond that while the card's memory in use
+/// by this process is under nine tenths of the budget the system gives it;
+/// and past that up to [`TEXTURE_LIMIT_MB`] of them while the PC has
+/// [`PC_SPARE`] left to commit.
+///
+/// The card fills before the textures do: on an 8 GB card the targets the
+/// host renders to take 3 GB (the console's own are 2.8 GB, so nothing is
+/// doubled), and with copies of title buffers the card's budget was 90%
+/// used at 2 GB of textures. Past that no texture was made: 10,000 title
+/// textures (8 GB of title memory) had no host copy, and shaders read
+/// black through their slots, the world lit but untextured. With 4 GB of
+/// them (run of 2026-11-25) walls and faces came back; the card was 1.8 GB
+/// over its budget, the system moved that much into the PC's memory, and
+/// the time per draw stayed the same. Going over ended runs 20 and 24
+/// when the PC itself ran out, hence the spare. It is commit left (memory
+/// plus page file), not free memory: on a 16 GB PC under 1 GB is free
+/// in the world either way (the system pages), and a spare of free memory
+/// kept the textures at 2 GB and the world black again.
+/// `VICTORY_TEXTURE_BUDGET_MB=<n>` sets the limit (live, `crate::live`);
+/// `=card` keeps to the card's budget, as before.
 #[cfg(windows)]
 pub(crate) fn room() -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     const FLOOR: u64 = 2 << 30;
     const WITHOUT_BUDGET: u64 = 4 << 30;
-    static LIMIT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let limit = *LIMIT.get_or_init(|| {
-        let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
-        mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
+    // Megabytes; 0 keeps to the card's budget.
+    static LIMIT: crate::live::Switch = crate::live::Switch::new("VICTORY_TEXTURE_BUDGET_MB", |v| match v.map(str::trim) {
+        None => TEXTURE_LIMIT_MB,
+        Some("card") => 0,
+        Some(mb) => mb.parse::<u32>().unwrap_or(TEXTURE_LIMIT_MB),
     });
     let filled = KINDS[1].load(Relaxed);
-    if let Some(limit) = limit {
-        return filled < limit;
-    }
     if filled < FLOOR {
         return true;
     }
-    match crate::host::host().and_then(|h| h.video_memory()) {
+    let card = match crate::host::host().and_then(|h| h.video_memory()) {
         Some([budget, used, ..]) => used < budget / 10 * 9,
         None => filled < WITHOUT_BUDGET,
+    };
+    let limit = u64::from(LIMIT.get()) << 20;
+    card || (filled < limit && pc_free() > PC_SPARE)
+}
+
+/// Megabytes of host copies of textures the title fills that [`room`]
+/// allows past the card's budget.
+#[cfg(windows)]
+const TEXTURE_LIMIT_MB: u32 = 4096;
+
+/// The PC's commit (memory plus page file) [`room`] keeps unused past the
+/// card's budget.
+#[cfg(windows)]
+const PC_SPARE: u64 = 2 << 30;
+
+/// What the PC has left to commit, asked at most every quarter second.
+#[cfg(windows)]
+fn pc_free() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    static FREE: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    if now.saturating_sub(ASKED.load(Relaxed)) < 250 && ASKED.load(Relaxed) != 0 {
+        return FREE.load(Relaxed);
     }
+    // SAFETY: plain data the call fills in.
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: a plain query into a structure of ours with its length set.
+    let free = if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.ullAvailPageFile } else { u64::MAX };
+    FREE.store(free, Relaxed);
+    ASKED.store(now.max(1), Relaxed);
+    free
 }
 
 /// Lets go of the host copies of textures the title fills that nothing
@@ -1517,6 +1563,72 @@ pub(crate) fn census() -> [u64; 10] {
         }
     }
     count
+}
+
+/// How the textures the host renders to or writes lie in title memory
+/// (diagnostics, for the memory line): the console reuses a heap's memory
+/// for targets that are not alive at once, the host gives each its own.
+/// Of those with a host copy: how many, their host bytes (twins included),
+/// how many are placed in a title heap, their title bytes summed, the title
+/// bytes they cover together, how many share title memory with another,
+/// those ones' host bytes, and the host bytes of the ones a list holds now.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn targets_overlap() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    let mut spans: Vec<(u64, u64, u64)> = Vec::new();
+    let all = textures();
+    for &at in all.iter() {
+        // SAFETY: as in `census`.
+        let r = unsafe { &*(at as *const Resource) };
+        let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((host, twin)) = made.as_ref() else { continue };
+        if host.filled {
+            continue;
+        }
+        let bytes = host.bytes + twin.as_ref().map_or(0, |t| t.colour.bytes);
+        out[0] += 1;
+        out[1] += bytes;
+        if r.host.placed.load(std::sync::atomic::Ordering::Relaxed) {
+            out[2] += 1;
+        }
+        if crate::host::references(&host.texture) > 1 {
+            out[7] += bytes;
+        }
+        let len = footprint(&r.desc).map_or(0, |f| f.size);
+        let start = r.data() as u64;
+        if len > 0 {
+            out[3] += len;
+            spans.push((start, start + len, bytes));
+        }
+    }
+    drop(all);
+    spans.sort_unstable();
+    let mut shared = vec![false; spans.len()];
+    let (mut reach, mut reach_at) = (0u64, usize::MAX);
+    let (mut union_start, mut union_end) = (0u64, 0u64);
+    for (i, &(start, end, _)) in spans.iter().enumerate() {
+        if start < reach {
+            shared[i] = true;
+            shared[reach_at] = true;
+        }
+        if end > reach {
+            (reach, reach_at) = (end, i);
+        }
+        if start >= union_end {
+            out[4] += union_end - union_start;
+            (union_start, union_end) = (start, end);
+        } else {
+            union_end = union_end.max(end);
+        }
+    }
+    out[4] += union_end - union_start;
+    for (i, &(_, _, bytes)) in spans.iter().enumerate() {
+        if shared[i] {
+            out[5] += 1;
+            out[6] += bytes;
+        }
+    }
+    out
 }
 
 /// Host textures alive (the title's and the twins) and the bytes the host
