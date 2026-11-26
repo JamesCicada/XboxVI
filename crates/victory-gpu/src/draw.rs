@@ -740,61 +740,6 @@ fn set(roots: &mut Vec<Root>, slot: u32, root: Root) {
     roots[slot] = root;
 }
 
-/// Buffer views of the heap pass ([`heap_buffer_pass`]) whose memory the
-/// title has unmapped, since the last line: how many, their bytes, and of
-/// them the host slots made null.
-static BUFFERS_AWAY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-
-/// Whether title slot `index` (its record at `handle`) is a buffer view of
-/// memory the title has unmapped; then, unless `VICTORY_BUFFERS_AWAY=0`
-/// (live, `crate::live`), its host slot becomes null and the pass leaves
-/// it out.
-///
-/// The pass gives every buffer view of the heap a host copy and refreshes
-/// it each frame, since shaders may pick any by index, and a slot keeps
-/// the copy it shows. The title leaves views of memory it has streamed out
-/// in its heap, so their windows of title memory were never let go: 473
-/// windows (2.0 GB) a minute into the world of run on7900b, 732 (3.0 GB)
-/// four minutes later, every one shown by a slot, on a card already past
-/// its budget. On the console a shader that read such a view would read
-/// unmapped memory; the title does not, so a null slot (zeros) loses
-/// nothing. A slot written again is made again as before.
-fn buffer_away(host: &crate::descriptor::host::HostHeap, index: u32, handle: u64) -> bool {
-    static ON: crate::live::Switch =
-        crate::live::Switch::new("VICTORY_BUFFERS_AWAY", |v| u32::from(v.map(str::trim) != Some("0")));
-    let Some(view) = crate::descriptor::view(handle) else {
-        return false;
-    };
-    let Some((address, len)) = crate::descriptor::host::buffer_range(&view) else {
-        return false;
-    };
-    if len == 0 || crate::texture::mapped_bytes(address as *const u8, len as usize) != 0 {
-        return false;
-    }
-    BUFFERS_AWAY[0].fetch_add(1, Ordering::Relaxed);
-    BUFFERS_AWAY[1].fetch_add(len, Ordering::Relaxed);
-    if ON.get() == 0 {
-        return false;
-    }
-    if host.buffer_slot_gone(index) {
-        BUFFERS_AWAY[2].fetch_add(1, Ordering::Relaxed);
-    }
-    true
-}
-
-/// The line of [`BUFFERS_AWAY`], every 300 passes.
-fn buffers_away_line() {
-    static PASSES: AtomicU64 = AtomicU64::new(0);
-    if !PASSES.fetch_add(1, Ordering::Relaxed).is_multiple_of(300) {
-        return;
-    }
-    let [n, bytes, made_null] = [0, 1, 2].map(|i| BUFFERS_AWAY[i].swap(0, Ordering::Relaxed));
-    tracing::info!(
-        "buffer views of the heap over title memory that is not mapped, in the last 300 passes: {n} looked at ({} MB), {made_null} host slots made null (VICTORY_BUFFERS_AWAY=0: kept)",
-        bytes >> 20
-    );
-}
-
 /// The pass over the buffer views of `heap` that shaders pick by index
 /// ([`State::heap_buffers`]): their host slots are made, and the host copies
 /// they show are to be refreshed.
@@ -830,7 +775,6 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         changed
     };
     *passes += 1;
-    buffers_away_line();
     // Whether the device was there before the pass: a view that removes
     // it is named below.
     static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -854,11 +798,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         if host.copied_tabled(index, frame) {
             return None;
         }
-        let handle = heap.handle(index)?;
-        if buffer_away(host, index, handle) {
-            return None;
-        }
-        let view = host.mirror(index, handle, true)?;
+        let view = host.mirror(index, heap.handle(index)?, true)?;
         // The copy the slot shows (`buffer_copy`), not the one the
         // view's range alone would find.
         let (shadow, address, len) = crate::descriptor::host::buffer_copy(&view)?;
